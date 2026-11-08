@@ -86,6 +86,33 @@ uint64_t pseudo_pct(double pct, double dt_s) {
   return static_cast<uint64_t>(std::llround(pct * 1e7 * dt_s));
 }
 
+// Cumulative counters are monotone by construction; PDH pseudo-counters are
+// not (the measured collect interval jitters, so llround can step a value
+// down between ticks). The shared delta path rejects decreasing counters,
+// so every emitted pseudo-counter is clamped to its last value per key.
+class MonotonicCounters {
+public:
+  uint64_t next(const std::string &key, uint64_t value) {
+    uint64_t &last = last_[key];
+    if (value < last) value = last;
+    last = value;
+    return value;
+  }
+
+private:
+  std::map<std::string, uint64_t> last_;
+};
+MonotonicCounters &monotonic() {
+  static MonotonicCounters counters;
+  return counters;
+}
+uint64_t mono_rate(const std::string &key, double rate) {
+  return monotonic().next(key, pseudo_rate(rate, 1.0));
+}
+uint64_t mono_pct(const std::string &key, double pct) {
+  return monotonic().next(key, pseudo_pct(pct, 1.0));
+}
+
 std::string wide_to_utf8(const wchar_t *w) {
   if (!w) return {};
   const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
@@ -264,11 +291,11 @@ bool read_cpu_snapshot(std::map<int64_t, CpuCounters> &cores, CpuCounters &total
   const double dt = 1.0; // values already scaled to dt by collect()
 
   total = CpuCounters{};
-  total.values[0] = pseudo_pct(gauge(0, "_Total"), 1.0);   // user
-  total.values[2] = pseudo_pct(gauge(1, "_Total"), 1.0);   // privileged
-  total.values[3] = pseudo_pct(gauge(2, "_Total"), 1.0);   // idle
-  total.values[5] = pseudo_pct(gauge(3, "_Total"), 1.0);   // interrupt
-  total.values[6] = pseudo_pct(gauge(4, "_Total"), 1.0);   // dpc
+  total.values[0] = mono_pct("cpu.total.user", gauge(0, "_Total"));
+  total.values[2] = mono_pct("cpu.total.priv", gauge(1, "_Total"));
+  total.values[3] = mono_pct("cpu.total.idle", gauge(2, "_Total"));
+  total.values[5] = mono_pct("cpu.total.irq", gauge(3, "_Total"));
+  total.values[6] = mono_pct("cpu.total.dpc", gauge(4, "_Total"));
 
   cores.clear();
   for (const auto &[name, idle] : rows[7]) { // \Processor(*)\% Idle Time
@@ -277,9 +304,11 @@ bool read_cpu_snapshot(std::map<int64_t, CpuCounters> &cores, CpuCounters &total
     CpuCounters core;
     const auto user = rows[5].find(name);
     const auto priv = rows[6].find(name);
-    core.values[0] = pseudo_pct(user == rows[5].end() ? 0.0 : user->second, 1.0);
-    core.values[2] = pseudo_pct(priv == rows[6].end() ? 0.0 : priv->second, 1.0);
-    core.values[3] = pseudo_pct(idle, 1.0);
+    core.values[0] = mono_pct("cpu.core." + name + ".user",
+                              user == rows[5].end() ? 0.0 : user->second);
+    core.values[2] = mono_pct("cpu.core." + name + ".priv",
+                              priv == rows[6].end() ? 0.0 : priv->second);
+    core.values[3] = mono_pct("cpu.core." + name + ".idle", idle);
     cores[id] = core;
   }
   (void)dt;
@@ -332,11 +361,11 @@ bool read_disk_snapshot(DiskSnapshot &out, std::string &error) {
     const int slot = name_to_slot.emplace(name, static_cast<int>(name_to_slot.size())).first->second;
     DiskCounters counters;
     counters.name = name;
-    counters.reads = pseudo_rate(read_ops, 1.0);
-    counters.read_sectors = pseudo_rate(read_bytes / 512.0, 1.0);
-    counters.writes = pseudo_rate(write_ops, 1.0);
-    counters.write_sectors = pseudo_rate(write_bytes / 512.0, 1.0);
-    counters.io_ms = pseudo_rate(util * 10000.0, 1.0);
+    counters.reads = mono_rate("disk." + name + ".reads", read_ops);
+    counters.read_sectors = mono_rate("disk." + name + ".rbytes", read_bytes / 512.0);
+    counters.writes = mono_rate("disk." + name + ".writes", write_ops);
+    counters.write_sectors = mono_rate("disk." + name + ".wbytes", write_bytes / 512.0);
+    counters.io_ms = mono_rate("disk." + name + ".util", util * 10000.0);
     out[{0, slot}] = counters;
   }
   return !out.empty();
@@ -357,14 +386,14 @@ bool read_net_dev(NetSnapshot &out, std::string &error) {
       return it == rows[i].end() ? 0.0 : it->second;
     };
     NetCounters counters;
-    counters.rx_bytes = pseudo_rate(rx_bytes, 1.0);
-    counters.rx_packets = pseudo_rate(get(2), 1.0);
-    counters.rx_errors = pseudo_rate(get(4), 1.0);
-    counters.rx_dropped = pseudo_rate(get(6), 1.0);
-    counters.tx_bytes = pseudo_rate(get(1), 1.0);
-    counters.tx_packets = pseudo_rate(get(3), 1.0);
-    counters.tx_errors = pseudo_rate(get(5), 1.0);
-    counters.tx_dropped = pseudo_rate(get(7), 1.0);
+    counters.rx_bytes = mono_rate("net." + name + ".rxbytes", rx_bytes);
+    counters.rx_packets = mono_rate("net." + name + ".rxpkt", get(2));
+    counters.rx_errors = mono_rate("net." + name + ".rxerr", get(4));
+    counters.rx_dropped = mono_rate("net." + name + ".rxdrop", get(6));
+    counters.tx_bytes = mono_rate("net." + name + ".txbytes", get(1));
+    counters.tx_packets = mono_rate("net." + name + ".txpkt", get(3));
+    counters.tx_errors = mono_rate("net." + name + ".txerr", get(5));
+    counters.tx_dropped = mono_rate("net." + name + ".txdrop", get(7));
     out[name] = counters;
   }
   return !out.empty();
