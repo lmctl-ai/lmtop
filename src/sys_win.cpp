@@ -11,6 +11,8 @@
 #include <pdh.h>
 #include <pdhmsg.h>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -23,6 +25,51 @@ namespace lmtop {
 bool sampling_supported() { return true; }
 
 namespace {
+
+// PDH CStatus: 0 = valid data, 1 = new data (first collect after add). Both
+// are usable; anything else means the value is not ready.
+constexpr uint32_t kPdhValidData = 0x00000000u;
+constexpr uint32_t kPdhNewData = 0x00000001u;
+bool pdh_status_ok(DWORD status) {
+  return status == kPdhValidData || status == kPdhNewData;
+}
+
+// "_Total", plus the ",_total" suffix some PDH builds append to instance
+// names (e.g. "0 C:,_total"). Case-insensitive, per lmdebug sample_win.cpp.
+bool is_total_instance(const std::string &name) {
+  std::string lower;
+  lower.reserve(name.size());
+  for (unsigned char c : name) lower += static_cast<char>(std::tolower(c));
+  if (lower == "_total") return true;
+  return lower.size() > 7 && lower.compare(lower.size() - 7, 7, ",_total") == 0;
+}
+
+// Processor instances are "N" on single-group systems and "group,N" on
+// multi-socket/NUMA systems (the \Processor and \Processor Information sets
+// both do this). Returns a stable core id.
+bool parse_processor_instance(const std::string &name, int64_t &core_id) {
+  if (name.empty() || is_total_instance(name)) return false;
+  const auto comma = name.find(',');
+  int group = 0, number = 0;
+  auto parse_int = [](const std::string &s, int &out) {
+    if (s.empty() || s.size() > 9) return false;
+    int v = 0;
+    for (char c : s) {
+      if (c < '0' || c > '9') return false;
+      v = v * 10 + (c - '0');
+    }
+    out = v;
+    return true;
+  };
+  if (comma == std::string::npos) {
+    if (!parse_int(name, number)) return false;
+  } else if (!parse_int(name.substr(0, comma), group) ||
+             !parse_int(name.substr(comma + 1), number)) {
+    return false;
+  }
+  core_id = static_cast<int64_t>(group) * 64 + number;
+  return true;
+}
 
 // PDH rates and percentage-gauges arrive between two collects; the rest of
 // lmtop works on cumulative counters and one shared delta path. The bridge
@@ -99,7 +146,7 @@ public:
         PDH_FMT_COUNTERVALUE value;
         if (PdhGetFormattedCounterValue(counters_[i], PDH_FMT_DOUBLE, nullptr,
                                         &value) == ERROR_SUCCESS &&
-            value.CStatus == ERROR_SUCCESS) {
+            pdh_status_ok(value.CStatus)) {
           values["_Total"] = value.doubleValue;
         }
         continue;
@@ -113,7 +160,7 @@ public:
         continue;
       }
       for (DWORD k = 0; k < item_count; ++k) {
-        if (items[k].FmtValue.CStatus != ERROR_SUCCESS) continue;
+        if (!pdh_status_ok(items[k].FmtValue.CStatus)) continue;
         values[wide_to_utf8(items[k].szName)] = items[k].FmtValue.doubleValue;
       }
     }
@@ -164,12 +211,15 @@ PdhQuery &disk_query() {
   static PdhQuery query;
   static bool opened = [] {
     std::string error;
+    // Utilization comes from % Idle Time, not % Disk Time: the latter is
+    // unreliable (can exceed 100% on fast/RAID storage). Same choice as
+    // lmdebug sample_win.cpp.
     return query.open(
         {"\\\\PhysicalDisk(*)\\Disk Read Bytes/sec",
          "\\\\PhysicalDisk(*)\\Disk Write Bytes/sec",
          "\\\\PhysicalDisk(*)\\Disk Reads/sec",
          "\\\\PhysicalDisk(*)\\Disk Writes/sec",
-         "\\\\PhysicalDisk(*)\\% Disk Time"},
+         "\\\\PhysicalDisk(*)\\% Idle Time"},
         error);
   }();
   (void)opened;
@@ -222,23 +272,15 @@ bool read_cpu_snapshot(std::map<int64_t, CpuCounters> &cores, CpuCounters &total
 
   cores.clear();
   for (const auto &[name, idle] : rows[7]) { // \Processor(*)\% Idle Time
-    if (name == "_Total") continue;
-    try {
-      size_t used = 0;
-      const int64_t id = std::stoll(name, &used);
-      if (used != name.size()) continue;
-      CpuCounters core;
-      const auto user = rows[5].find(name);
-      const auto priv = rows[6].find(name);
-      core.values[0] =
-          pseudo_pct(user == rows[5].end() ? 0.0 : user->second, 1.0);
-      core.values[2] =
-          pseudo_pct(priv == rows[6].end() ? 0.0 : priv->second, 1.0);
-      core.values[3] = pseudo_pct(idle, 1.0);
-      cores[id] = core;
-    } catch (...) {
-      continue;
-    }
+    int64_t id = 0;
+    if (!parse_processor_instance(name, id)) continue;
+    CpuCounters core;
+    const auto user = rows[5].find(name);
+    const auto priv = rows[6].find(name);
+    core.values[0] = pseudo_pct(user == rows[5].end() ? 0.0 : user->second, 1.0);
+    core.values[2] = pseudo_pct(priv == rows[6].end() ? 0.0 : priv->second, 1.0);
+    core.values[3] = pseudo_pct(idle, 1.0);
+    cores[id] = core;
   }
   (void)dt;
   return !cores.empty();
@@ -279,11 +321,14 @@ bool read_disk_snapshot(DiskSnapshot &out, std::string &error) {
   static std::map<std::string, int> name_to_slot; // stable (major, minor) keys
   out.clear();
   for (const auto &[name, read_bytes] : rows[0]) {
-    if (name == "_Total") continue;
+    if (is_total_instance(name)) continue;
     const auto &write_bytes = rows[1].count(name) ? rows[1].at(name) : 0.0;
     const auto &read_ops = rows[2].count(name) ? rows[2].at(name) : 0.0;
     const auto &write_ops = rows[3].count(name) ? rows[3].at(name) : 0.0;
-    const auto &util = rows[4].count(name) ? rows[4].at(name) : 0.0;
+    // util = 100 - idle (idle gauge already clamped by pdh_pct semantics).
+    const auto idle_it = rows[4].find(name);
+    const double idle = idle_it == rows[4].end() ? 100.0 : idle_it->second;
+    const double util = std::clamp(100.0 - std::clamp(idle, 0.0, 100.0), 0.0, 100.0);
     const int slot = name_to_slot.emplace(name, static_cast<int>(name_to_slot.size())).first->second;
     DiskCounters counters;
     counters.name = name;
@@ -305,7 +350,8 @@ bool read_net_dev(NetSnapshot &out, std::string &error) {
 
   out.clear();
   for (const auto &[name, rx_bytes] : rows[0]) {
-    if (name == "_Total" || name.find("Loopback") != std::string::npos) continue;
+    if (is_total_instance(name) || name.find("Loopback") != std::string::npos)
+      continue;
     auto get = [&](size_t i) -> double {
       const auto it = rows[i].find(name);
       return it == rows[i].end() ? 0.0 : it->second;
