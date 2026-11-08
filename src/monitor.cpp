@@ -46,6 +46,7 @@ Json catalog_json() {
 } // namespace
 
 bool Monitor::start(int64_t interval_ms, size_t cap_bytes, std::string &error) {
+  (void)error; // start no longer fails; warm-up issues are logged
   interval_ = std::chrono::milliseconds(std::clamp<int64_t>(interval_ms, 100, 60000));
   cap_samples_ = std::max<size_t>(1, cap_bytes / kSampleBytes);
 
