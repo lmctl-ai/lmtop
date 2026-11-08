@@ -15,7 +15,7 @@ jobs:
         include:
           - os: ubuntu-latest
             asset: lmtop-linux-x86_64
-          - os: windows-latest
+          - os: windows-2025
             asset: lmtop-windows-x86_64.exe
           - os: macos-latest
             asset: lmtop-macos-arm64
@@ -23,6 +23,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Repair performance counters
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          lodctr /R
+          Set-Location C:\Windows\SysWOW64
+          lodctr /R
 
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
