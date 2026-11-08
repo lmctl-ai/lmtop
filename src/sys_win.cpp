@@ -215,11 +215,11 @@ private:
   std::chrono::steady_clock::time_point prev_{};
 };
 
-PdhQuery &cpu_query() {
+PdhQuery &cpu_query(std::string &open_error) {
   static PdhQuery query;
-  static bool opened = [] {
+  static const std::string init_error = [] {
     std::string error;
-    return query.open(
+    query.open(
         {"\\\\Processor(_Total)\\% User Time",
          "\\\\Processor(_Total)\\% Privileged Time",
          "\\\\Processor(_Total)\\% Idle Time",
@@ -229,14 +229,15 @@ PdhQuery &cpu_query() {
          "\\\\Processor(*)\\% Privileged Time",
          "\\\\Processor(*)\\% Idle Time"},
         error);
+    return error;
   }();
-  (void)opened;
+  open_error = init_error;
   return query;
 }
 
-PdhQuery &disk_query() {
+PdhQuery &disk_query(std::string &open_error) {
   static PdhQuery query;
-  static bool opened = [] {
+  static const std::string init_error = [] {
     std::string error;
     // Utilization comes from % Idle Time, not % Disk Time: the latter is
     // unreliable (can exceed 100% on fast/RAID storage). Same choice as
@@ -248,14 +249,15 @@ PdhQuery &disk_query() {
          "\\\\PhysicalDisk(*)\\Disk Writes/sec",
          "\\\\PhysicalDisk(*)\\% Idle Time"},
         error);
+    return error;
   }();
-  (void)opened;
+  open_error = init_error;
   return query;
 }
 
-PdhQuery &net_query() {
+PdhQuery &net_query(std::string &open_error) {
   static PdhQuery query;
-  static bool opened = [] {
+  static const std::string init_error = [] {
     std::string error;
     return query.open(
         {"\\\\Network Interface(*)\\Bytes Received/sec",
@@ -267,8 +269,9 @@ PdhQuery &net_query() {
          "\\\\Network Interface(*)\\Packets Received Discarded",
          "\\\\Network Interface(*)\\Packets Outbound Discarded"},
         error);
+    return error;
   }();
-  (void)opened;
+  open_error = init_error;
   return query;
 }
 
@@ -279,10 +282,16 @@ PdhQuery &net_query() {
 // cpu_percentages normalizes them like Linux counters. iowait/PSI have no
 // Windows equivalent: iowait reports 0, PSI reports missing.
 
-bool read_cpu_snapshot(std::map<int64_t, CpuCounters> &cores, CpuCounters &total) {
+bool read_cpu_snapshot(std::map<int64_t, CpuCounters> &cores, CpuCounters &total,
+                       std::string &error) {
   std::vector<std::map<std::string, double>> rows;
-  std::string error;
-  if (!cpu_query().collect(rows, error) || rows.size() < 8) return false;
+  std::string open_error;
+  auto &query = cpu_query(open_error);
+  if (!open_error.empty()) {
+    error = open_error;
+    return false;
+  }
+  if (!query.collect(rows, error) || rows.size() < 8) return false;
 
   auto gauge = [&](size_t i, const std::string &name) -> double {
     const auto it = rows[i].find(name);
@@ -345,7 +354,13 @@ bool read_meminfo(MemInfo &out, std::string &error) {
 
 bool read_disk_snapshot(DiskSnapshot &out, std::string &error) {
   std::vector<std::map<std::string, double>> rows;
-  if (!disk_query().collect(rows, error) || rows.size() < 5) return false;
+  std::string open_error;
+  auto &query = disk_query(open_error);
+  if (!open_error.empty()) {
+    error = open_error;
+    return false;
+  }
+  if (!query.collect(rows, error) || rows.size() < 5) return false;
 
   static std::map<std::string, int> name_to_slot; // stable (major, minor) keys
   out.clear();
@@ -375,7 +390,13 @@ bool read_disk_snapshot(DiskSnapshot &out, std::string &error) {
 
 bool read_net_dev(NetSnapshot &out, std::string &error) {
   std::vector<std::map<std::string, double>> rows;
-  if (!net_query().collect(rows, error) || rows.size() < 8) return false;
+  std::string open_error;
+  auto &query = net_query(open_error);
+  if (!open_error.empty()) {
+    error = open_error;
+    return false;
+  }
+  if (!query.collect(rows, error) || rows.size() < 8) return false;
 
   out.clear();
   for (const auto &[name, rx_bytes] : rows[0]) {

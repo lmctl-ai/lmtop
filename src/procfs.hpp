@@ -36,7 +36,8 @@ struct CpuCounters {
   std::array<uint64_t, 8> values{};
 };
 
-bool read_cpu_snapshot(std::map<int64_t, CpuCounters> &cores, CpuCounters &total);
+bool read_cpu_snapshot(std::map<int64_t, CpuCounters> &cores, CpuCounters &total,
+                       std::string &error);
 
 // Percentages over a delta window. user = user+nice, system = system+irq+
 // softirq+steal (lmdebug sys cpu normalization). Returns false when a counter

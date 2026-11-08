@@ -34,9 +34,13 @@ bool u64_token(const std::string &s, uint64_t &value) {
 
 // --- CPU --------------------------------------------------------------------
 
-bool read_cpu_snapshot(std::map<int64_t, CpuCounters> &cores, CpuCounters &total) {
+bool read_cpu_snapshot(std::map<int64_t, CpuCounters> &cores, CpuCounters &total,
+                       std::string &error) {
   std::ifstream file("/proc/stat");
-  if (!file) return false;
+  if (!file) {
+    error = "cannot read /proc/stat";
+    return false;
+  }
   cores.clear();
   std::string line;
   bool have_total = false;

@@ -84,10 +84,10 @@ struct Sample {
   int64_t unix_ms = 0;       // wall clock at the tick
   double dt_s = 0;           // measured seconds since the previous snapshot
   std::array<double, kMetricCount> value{};
-  bool cpu_ok = false;       // group reader status for this tick
-  bool mem_ok = false;
-  bool disk_ok = false;
-  bool net_ok = false;
+  std::string cpu_error;     // "" = ok; the reader's message otherwise
+  std::string mem_error;
+  std::string disk_error;
+  std::string net_error;
 
   Sample() { value.fill(missing()); }
 };

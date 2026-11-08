@@ -67,14 +67,13 @@ bool Monitor::start(int64_t interval_ms, size_t cap_bytes, std::string &error) {
   CpuCounters cpu_total;
   std::map<int64_t, CpuCounters> cpu_cores;
   std::string err;
-  const bool cpu_ok = read_cpu_snapshot(cpu_cores, cpu_total);
+  const bool cpu_ok = read_cpu_snapshot(cpu_cores, cpu_total, err);
   if (!cpu_ok) err = "initial cpu snapshot failed (warm-up)";
   DiskSnapshot disks;
   if (!read_disk_snapshot(disks, err)) disks.clear();
   NetSnapshot links;
   if (!read_net_dev(links, err)) links.clear();
   cpu_count_ = static_cast<int64_t>(cpu_cores.size());
-
   {
     std::lock_guard<std::mutex> lock(mu_);
     prev_cpu_total_ = cpu_total;
@@ -128,14 +127,14 @@ void Monitor::loop() {
 
 void Monitor::tick(const std::chrono::steady_clock::time_point &t) {
   Sample s;
+  std::string err;
   s.unix_ms = now_unix_ms();
   const double dt = std::chrono::duration<double>(t - prev_time_).count();
   s.dt_s = dt;
 
   CpuCounters cpu_total;
   std::map<int64_t, CpuCounters> cpu_cores;
-  if (read_cpu_snapshot(cpu_cores, cpu_total)) {
-    s.cpu_ok = true;
+  if (read_cpu_snapshot(cpu_cores, cpu_total, err)) {
     double user = missing(), system = missing(), iowait = missing(), idle = missing();
     if (have_prev_ && dt > 0 &&
         cpu_percentages(prev_cpu_total_, cpu_total, user, system, iowait, idle)) {
@@ -167,12 +166,13 @@ void Monitor::tick(const std::chrono::steady_clock::time_point &t) {
       prev_cpu_cores_ = std::move(cpu_cores);
       cpu_count_ = static_cast<int64_t>(prev_cpu_cores_.size());
     }
+  } else {
+    s.cpu_error = err;
   }
 
   MemInfo mem;
-  std::string err;
   if (read_meminfo(mem, err)) {
-    s.mem_ok = true;
+    err.clear();
     s.value[M_MEM_USED] =
         100.0 * static_cast<double>(mem.total_bytes - mem.available_bytes) /
         static_cast<double>(mem.total_bytes);
@@ -183,11 +183,12 @@ void Monitor::tick(const std::chrono::steady_clock::time_point &t) {
           static_cast<double>(mem.swap_total_bytes - mem.swap_free_bytes) /
           static_cast<double>(mem.swap_total_bytes);
     s.value[M_MEM_PSI] = psi_avg10("/proc/pressure/memory", "some");
+  } else {
+    s.mem_error = err;
   }
 
   DiskSnapshot disks;
   if (read_disk_snapshot(disks, err)) {
-    s.disk_ok = true;
     if (have_prev_ && dt > 0) {
       double sum_rb = 0, sum_wb = 0, sum_ri = 0, sum_wi = 0, max_util = 0;
       bool any = false, any_util = false;
@@ -217,11 +218,12 @@ void Monitor::tick(const std::chrono::steady_clock::time_point &t) {
     s.value[M_DISK_PSI] = psi_avg10("/proc/pressure/io", "some");
     std::lock_guard<std::mutex> lock(mu_);
     prev_disks_ = std::move(disks);
+  } else {
+    s.disk_error = err;
   }
 
   NetSnapshot links;
   if (read_net_dev(links, err)) {
-    s.net_ok = true;
     if (have_prev_ && dt > 0) {
       double rx_b = 0, tx_b = 0, rx_p = 0, tx_p = 0, rx_e = 0, tx_e = 0,
              rx_d = 0, tx_d = 0;
@@ -264,6 +266,8 @@ void Monitor::tick(const std::chrono::steady_clock::time_point &t) {
     }
     std::lock_guard<std::mutex> lock(mu_);
     prev_links_ = std::move(links);
+  } else {
+    s.net_error = err;
   }
 
   have_prev_ = true;
@@ -331,10 +335,10 @@ Json Monitor::now_json() const {
       {"unix_ms", s.unix_ms},
       {"dt_s", emit(s.dt_s)},
       {"cpu_count", cpu_count_},
-      {"group_status", Json::obj({{"cpu", s.cpu_ok ? "ok" : "error"},
-                                  {"mem", s.mem_ok ? "ok" : "error"},
-                                  {"disk", s.disk_ok ? "ok" : "error"},
-                                  {"net", s.net_ok ? "ok" : "error"}})},
+      {"group_status", Json::obj({{"cpu", s.cpu_error.empty() ? "ok" : s.cpu_error},
+                                  {"mem", s.mem_error.empty() ? "ok" : s.mem_error},
+                                  {"disk", s.disk_error.empty() ? "ok" : s.disk_error},
+                                  {"net", s.net_error.empty() ? "ok" : s.net_error}})},
       {"values", Json(std::move(values))},
   });
 }

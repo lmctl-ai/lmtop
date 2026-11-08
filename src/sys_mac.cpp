@@ -26,13 +26,16 @@ bool sampling_supported() { return true; }
 // --- CPU (host_processor_info) ----------------------------------------------
 // cpu_ticks = { user, system, idle, nice } (CPU_STATE_*), cumulative.
 
-bool read_cpu_snapshot(std::map<int64_t, CpuCounters> &cores, CpuCounters &total) {
+bool read_cpu_snapshot(std::map<int64_t, CpuCounters> &cores, CpuCounters &total,
+                       std::string &error) {
   natural_t cpu_count = 0;
   processor_info_array_t info = nullptr;
   mach_msg_type_number_t info_count = 0;
   if (host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &cpu_count,
-                          &info, &info_count) != KERN_SUCCESS)
+                          &info, &info_count) != KERN_SUCCESS) {
+    error = "host_processor_info failed";
     return false;
+  }
   const auto *loads = reinterpret_cast<processor_cpu_load_info_data_t *>(info);
   total = CpuCounters{};
   for (natural_t i = 0; i < cpu_count; ++i) {
