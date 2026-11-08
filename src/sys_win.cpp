@@ -6,10 +6,15 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00 // Vista+ APIs: PdhAddEnglishCounterW, GetIfTable2
+#endif
 #include <windows.h>
 
+#include <iphlpapi.h>
 #include <pdh.h>
 #include <pdhmsg.h>
+#include <winioctl.h>
 
 #include <algorithm>
 #include <cctype>
@@ -289,6 +294,67 @@ PdhQuery &net_query(std::string &open_error) {
   return query;
 }
 
+struct ProcessorPerfInfo {
+  long long idle_time;
+  long long kernel_time; // includes idle
+  long long user_time;
+  long long reserved1[2];
+  unsigned long reserved2;
+};
+constexpr ULONG kSystemProcessorPerformanceInformation = 8;
+
+// Resolved at runtime so no import library is needed (ntdll is always
+// loaded); works identically on MSVC and MinGW.
+NTSTATUS nt_query_system_information(ULONG info_class, void *info, ULONG length,
+                                     ULONG *returned) {
+  using NtQueryFn = NTSTATUS(__stdcall *)(ULONG, void *, ULONG, ULONG *);
+  static const NtQueryFn fn = [] {
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    return ntdll ? reinterpret_cast<NtQueryFn>(
+                       GetProcAddress(ntdll, "NtQuerySystemInformation"))
+                 : nullptr;
+  }();
+  return fn ? fn(info_class, info, length, returned)
+            : static_cast<NTSTATUS>(0xC0000001L); // STATUS_UNSUCCESSFUL
+}
+
+enum class CpuPath { kPdh, kNt };
+CpuPath cpu_path() {
+  static const CpuPath path = [] {
+    std::string open_error;
+    cpu_query(open_error);
+    return open_error.empty() ? CpuPath::kPdh : CpuPath::kNt;
+  }();
+  return path;
+}
+
+bool read_cpu_via_nt(std::map<int64_t, CpuCounters> &cores, CpuCounters &total) {
+  ULONG count = 64;
+  std::vector<ProcessorPerfInfo> buffer(count);
+  ULONG returned = 0;
+  const NTSTATUS status = nt_query_system_information(
+      kSystemProcessorPerformanceInformation, buffer.data(),
+      static_cast<ULONG>(buffer.size() * sizeof(ProcessorPerfInfo)), &returned);
+  if (status < 0) return false;
+  count = returned / sizeof(ProcessorPerfInfo);
+  if (count == 0) return false;
+  buffer.resize(count);
+  cores.clear();
+  total = CpuCounters{};
+  for (ULONG i = 0; i < count; ++i) {
+    CpuCounters core;
+    core.values[0] = static_cast<uint64_t>(buffer[i].user_time);
+    core.values[2] = static_cast<uint64_t>(
+        buffer[i].kernel_time - buffer[i].idle_time);
+    core.values[3] = static_cast<uint64_t>(buffer[i].idle_time);
+    cores[static_cast<int64_t>(i)] = core;
+    for (int k = 0; k < 8; ++k)
+      total.values[static_cast<size_t>(k)] +=
+          core.values[static_cast<size_t>(k)];
+  }
+  return true;
+}
+
 } // namespace
 
 // --- CPU --------------------------------------------------------------------
@@ -298,6 +364,8 @@ PdhQuery &net_query(std::string &open_error) {
 
 bool read_cpu_snapshot(std::map<int64_t, CpuCounters> &cores, CpuCounters &total,
                        std::string &error) {
+  if (cpu_path() == CpuPath::kNt)
+    return read_cpu_via_nt(cores, total);
   std::vector<std::map<std::string, double>> rows;
   std::string open_error;
   auto &query = cpu_query(open_error);
@@ -366,7 +434,54 @@ bool read_meminfo(MemInfo &out, std::string &error) {
 // --- Disk -------------------------------------------------------------------
 // PDH per-disk rates -> per-tick pseudo counters.
 
+bool read_disk_via_ioctl(DiskSnapshot &out, std::string &error) {
+  out.clear();
+  int index = 0;
+  for (int i = 0; i < 64; ++i) {
+    const std::wstring name = L"\\\\.\\PhysicalDrive" + std::to_wstring(i);
+    const HANDLE drive = CreateFileW(name.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                     nullptr, OPEN_EXISTING, 0, nullptr);
+    if (drive == INVALID_HANDLE_VALUE) continue;
+    DISK_PERFORMANCE perf;
+    DWORD bytes = 0;
+    if (DeviceIoControl(drive, IOCTL_DISK_PERFORMANCE, nullptr, 0, &perf,
+                        sizeof(perf), &bytes, nullptr) &&
+        bytes >= sizeof(perf)) {
+      DiskCounters counters;
+      counters.name = "PhysicalDrive" + std::to_string(i);
+      counters.reads = perf.ReadCount;
+      counters.read_sectors = static_cast<uint64_t>(perf.BytesRead.QuadPart / 512);
+      counters.read_ms = static_cast<uint64_t>(perf.ReadTime.QuadPart / 10000);
+      counters.writes = perf.WriteCount;
+      counters.write_sectors = static_cast<uint64_t>(perf.BytesWritten.QuadPart / 512);
+      counters.write_ms = static_cast<uint64_t>(perf.WriteTime.QuadPart / 10000);
+      counters.io_ms = static_cast<uint64_t>(
+          (perf.ReadTime.QuadPart + perf.WriteTime.QuadPart) / 10000);
+      out[{0, index++}] = counters;
+    }
+    CloseHandle(drive);
+  }
+  if (out.empty()) {
+    error = "no physical drive accessible (admin required for "
+            "IOCTL_DISK_PERFORMANCE)";
+    return false;
+  }
+  return true;
+}
+
+enum class DiskPath { kPdh, kIoctl };
+DiskPath disk_path() {
+  static const DiskPath path = [] {
+    std::string open_error;
+    disk_query(open_error);
+    return open_error.empty() ? DiskPath::kPdh : DiskPath::kIoctl;
+  }();
+  return path;
+}
+
 bool read_disk_snapshot(DiskSnapshot &out, std::string &error) {
+  if (disk_path() == DiskPath::kIoctl)
+    return read_disk_via_ioctl(out, error);
   std::vector<std::map<std::string, double>> rows;
   std::string open_error;
   auto &query = disk_query(open_error);
@@ -402,7 +517,51 @@ bool read_disk_snapshot(DiskSnapshot &out, std::string &error) {
 
 // --- Network ----------------------------------------------------------------
 
+// Classic MIB_IFTABLE (GetIfTable): available since NT4 in every toolset,
+// unlike the Vista-era GetIfTable2 which some MinGW headers omit. Counters
+// are 32-bit; a decrease is treated as a wrap and the interval is skipped,
+// which the shared delta path already does.
+bool read_net_via_iphlpapi(NetSnapshot &out) {
+  ULONG size = 0;
+  if (GetIfTable(nullptr, &size, FALSE) != ERROR_INSUFFICIENT_BUFFER || size == 0)
+    return false;
+  std::vector<BYTE> buffer(size);
+  const MIB_IFTABLE *table = reinterpret_cast<const MIB_IFTABLE *>(buffer.data());
+  if (GetIfTable(reinterpret_cast<MIB_IFTABLE *>(buffer.data()), &size, FALSE) !=
+          NO_ERROR ||
+      table->dwNumEntries == 0)
+    return false;
+  out.clear();
+  for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+    const MIB_IFROW &row = table->table[i];
+    if (row.dwType == MIB_IF_TYPE_LOOPBACK) continue;
+    NetCounters counters;
+    counters.rx_bytes = row.dwInOctets;
+    counters.rx_packets = row.dwInUcastPkts + row.dwInNUcastPkts;
+    counters.rx_errors = row.dwInErrors;
+    counters.rx_dropped = row.dwInDiscards;
+    counters.tx_bytes = row.dwOutOctets;
+    counters.tx_packets = row.dwOutUcastPkts + row.dwOutNUcastPkts;
+    counters.tx_errors = row.dwOutErrors;
+    counters.tx_dropped = row.dwOutDiscards;
+    out["if" + std::to_string(row.dwIndex)] = counters;
+  }
+  return !out.empty();
+}
+
+enum class NetPath { kPdh, kIp };
+NetPath net_path() {
+  static const NetPath path = [] {
+    std::string open_error;
+    net_query(open_error);
+    return open_error.empty() ? NetPath::kPdh : NetPath::kIp;
+  }();
+  return path;
+}
+
 bool read_net_dev(NetSnapshot &out, std::string &error) {
+  if (net_path() == NetPath::kIp)
+    return read_net_via_iphlpapi(out);
   std::vector<std::map<std::string, double>> rows;
   std::string open_error;
   auto &query = net_query(open_error);

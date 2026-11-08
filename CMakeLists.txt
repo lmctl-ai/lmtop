@@ -33,7 +33,7 @@ add_executable(lmtop
 # One sys backend per OS, conditional compilation for full parity.
 if(WIN32)
   target_sources(lmtop PRIVATE src/sys_win.cpp)
-  target_link_libraries(lmtop PRIVATE pdh)
+  target_link_libraries(lmtop PRIVATE pdh iphlpapi)
 elseif(APPLE)
   target_sources(lmtop PRIVATE src/sys_mac.cpp)
   target_link_libraries(lmtop PRIVATE "-framework IOKit" "-framework CoreFoundation")
