@@ -104,9 +104,16 @@ bool read_meminfo(MemInfo &out, std::string &error) {
 
 namespace {
 
-uint64_t stat_u64(CFDictionaryRef dict, const char *key) {
+// Modern SDKs no longer export these as macros; the dictionary keys are the
+// stable string literals documented in IOKit (IOBlockStorageDriver.h).
+const CFStringRef kStatsKeyBytesRead = CFSTR("Bytes (Read)");
+const CFStringRef kStatsKeyBytesWritten = CFSTR("Bytes (Written)");
+const CFStringRef kStatsKeyOpsRead = CFSTR("Operations (Read)");
+const CFStringRef kStatsKeyOpsWritten = CFSTR("Operations (Written)");
+
+uint64_t stat_u64(CFDictionaryRef dict, CFStringRef key) {
   const CFNumberRef value =
-      static_cast<CFNumberRef>(CFDictionaryGetValue(dict, CFSTR(key)));
+      static_cast<CFNumberRef>(CFDictionaryGetValue(dict, key));
   uint64_t out = 0;
   if (value) CFNumberGetValue(value, kCFNumberSInt64Type, &out);
   return out;
@@ -144,13 +151,10 @@ bool read_disk_snapshot(DiskSnapshot &out, std::string &error) {
           std::snprintf(name, sizeof name, "disk%d", index);
         }
         counters.name = name;
-        counters.reads = stat_u64(dict, kIOBlockStorageDriverStatisticsOperationsRead);
-        counters.read_sectors =
-            stat_u64(dict, kIOBlockStorageDriverStatisticsBytesRead) / 512;
-        counters.writes =
-            stat_u64(dict, kIOBlockStorageDriverStatisticsOperationsWritten);
-        counters.write_sectors =
-            stat_u64(dict, kIOBlockStorageDriverStatisticsBytesWritten) / 512;
+        counters.reads = stat_u64(dict, kStatsKeyOpsRead);
+        counters.read_sectors = stat_u64(dict, kStatsKeyBytesRead) / 512;
+        counters.writes = stat_u64(dict, kStatsKeyOpsWritten);
+        counters.write_sectors = stat_u64(dict, kStatsKeyBytesWritten) / 512;
         out[{0, index++}] = counters;
       }
       CFRelease(prop);
@@ -185,7 +189,7 @@ bool read_net_dev(NetSnapshot &out, std::string &error) {
     counters.tx_bytes = data->ifi_obytes;
     counters.tx_packets = data->ifi_opackets;
     counters.tx_errors = data->ifi_oerrors;
-    counters.tx_dropped = data->ifi_odrops;
+    counters.tx_dropped = 0; // Darwin's if_data tracks no TX-drop counter
     out[name] = counters;
   }
   freeifaddrs(interfaces);

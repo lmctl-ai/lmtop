@@ -19,6 +19,7 @@ find_package(Threads REQUIRED)
 add_executable(lmtop
   src/main.cpp
   src/json.cpp
+  src/delta.cpp
   src/stats.cpp
   src/monitor.cpp
   src/server.cpp
