@@ -1,0 +1,68 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: lmtop-linux-x86_64
+          - os: windows-latest
+            asset: lmtop-windows-x86_64.exe
+          - os: macos-latest
+            asset: lmtop-macos-arm64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Integration test
+        run: python3 tests/integration.py build
+
+      - name: Stage asset
+        shell: bash
+        run: |
+          binary=$(python3 -c "
+          import glob
+          c = [p for pat in ('lmtop', 'lmtop.exe') for p in glob.glob('build/**/' + pat, recursive=True)]
+          c = [p for p in c if 'CMakeFiles' not in p]
+          print(sorted(c, key=len)[0])")
+          cp "$binary" "${{ matrix.asset }}"
+
+      - name: Upload asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "${{ github.ref_name }}" --generate-notes
