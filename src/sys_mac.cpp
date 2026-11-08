@@ -63,7 +63,7 @@ bool read_cpu_snapshot(std::map<int64_t, CpuCounters> &cores, CpuCounters &total
 bool read_meminfo(MemInfo &out, std::string &error) {
   uint64_t total = 0;
   size_t len = sizeof(total);
-  const int mib[2] = {CTL_HW, HW_MEMSIZE};
+  int mib[2] = {CTL_HW, HW_MEMSIZE};
   if (sysctl(mib, 2, &total, &len, nullptr, 0) != 0) {
     error = "sysctl HW_MEMSIZE failed";
     return false;
@@ -143,7 +143,7 @@ bool read_disk_snapshot(DiskSnapshot &out, std::string &error) {
         counters.util_supported = false;
         char name[128] = {0};
         if (CFStringRef bsd = static_cast<CFStringRef>(
-                IORegistryEntryCreateCFProperty(device, CFSTR(kIOBSDNameKey),
+                IORegistryEntryCreateCFProperty(device, CFSTR("BSD Name"),
                                                 kCFAllocatorDefault, 0))) {
           CFStringGetCString(bsd, name, sizeof name, kCFStringEncodingUTF8);
           CFRelease(bsd);

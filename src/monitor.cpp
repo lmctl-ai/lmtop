@@ -60,18 +60,18 @@ bool Monitor::start(int64_t interval_ms, size_t cap_bytes, std::string &error) {
   }
 
   // Baseline snapshot for the delta rates; the first Sample appears after
-  // one interval, so deltas always have a measured dt.
+  // one interval, so deltas always have a measured dt. A failed baseline
+  // (e.g. PDH's first collect has no data yet) only delays rates by one
+  // tick — the server stays up and warms up instead of exiting.
   CpuCounters cpu_total;
   std::map<int64_t, CpuCounters> cpu_cores;
   std::string err;
-  if (!read_cpu_snapshot(cpu_cores, cpu_total)) {
-    error = "cannot read /proc/stat";
-    return false;
-  }
+  const bool cpu_ok = read_cpu_snapshot(cpu_cores, cpu_total);
+  if (!cpu_ok) err = "initial cpu snapshot failed (warm-up)";
   DiskSnapshot disks;
-  if (!read_disk_snapshot(disks, err)) err.clear(); // tolerate
+  if (!read_disk_snapshot(disks, err)) disks.clear();
   NetSnapshot links;
-  if (!read_net_dev(links, err)) err.clear();       // tolerate
+  if (!read_net_dev(links, err)) links.clear();
   cpu_count_ = static_cast<int64_t>(cpu_cores.size());
 
   {
@@ -80,7 +80,7 @@ bool Monitor::start(int64_t interval_ms, size_t cap_bytes, std::string &error) {
     prev_cpu_cores_ = std::move(cpu_cores);
     prev_disks_ = std::move(disks);
     prev_links_ = std::move(links);
-    have_prev_ = true;
+    have_prev_ = cpu_ok;
   }
   if (!err.empty()) fprintf(stderr, "lmtop: warning: %s\n", err.c_str());
 

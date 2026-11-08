@@ -91,8 +91,11 @@ public:
       DWORD buffer_size = 0, item_count = 0;
       const PDH_STATUS status = PdhGetFormattedCounterArrayW(
           counters_[i], PDH_FMT_DOUBLE, &buffer_size, &item_count, nullptr);
+      // First collect after PdhAddCounter has no formatted data yet; a few
+      // counters also lack array semantics. Either way: skip the counter
+      // instead of failing the whole tick.
+      if (status == PDH_INVALID_DATA) continue;
       if (status == PDH_INVALID_ARGUMENT || buffer_size == 0) {
-        // Non-wildcard counter: single formatted value.
         PDH_FMT_COUNTERVALUE value;
         if (PdhGetFormattedCounterValue(counters_[i], PDH_FMT_DOUBLE, nullptr,
                                         &value) == ERROR_SUCCESS &&
@@ -101,17 +104,13 @@ public:
         }
         continue;
       }
-      if (status != PDH_MORE_DATA) {
-        error = "PdhGetFormattedCounterArrayW failed";
-        return false;
-      }
+      if (status != PDH_MORE_DATA) continue;
       std::vector<BYTE> buffer(buffer_size);
       auto *items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W *>(buffer.data());
       if (PdhGetFormattedCounterArrayW(counters_[i], PDH_FMT_DOUBLE,
                                        &buffer_size, &item_count,
                                        items) != ERROR_SUCCESS) {
-        error = "PdhGetFormattedCounterArrayW failed";
-        return false;
+        continue;
       }
       for (DWORD k = 0; k < item_count; ++k) {
         if (items[k].FmtValue.CStatus != ERROR_SUCCESS) continue;
