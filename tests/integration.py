@@ -222,11 +222,6 @@ def main():
 
             # --- get metrics -------------------------------------------------
             now = call("now")["result"]
-            print("DEBUG now.group_status:", now.get("group_status"),
-                  "cpu.usage_pct:", now["values"]["cpu.usage_pct"],
-                  "cpu.user_pct:", now["values"]["cpu.user_pct"],
-                  "cpu.max_core_busy_pct:", now["values"]["cpu.max_core_busy_pct"],
-                  flush=True)
             check_now(now)
             summary = call("summary", {"seconds": MONITOR_SECONDS})["result"]
             check_summary(summary)
