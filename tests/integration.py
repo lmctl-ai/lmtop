@@ -116,13 +116,13 @@ def check_now(now):
     expect(abs(user + system + iowait - usage) <= 1.0,
            f"user({user})+system({system})+iowait({iowait}) != usage({usage})")
 
-    max_core = values["cpu.max_core_busy_pct"]
-    if max_core != -1 and usage != -1:
-        expect(max_core + 0.5 >= usage, f"max core busy {max_core} < usage {usage}")
-
     now_ms = now["unix_ms"]
     expect(abs(now_ms - int(time.time() * 1000)) < 24 * 3600 * 1000,
            "unix_ms is a real wall-clock millisecond timestamp")
+    # Note: no per-sample "max core >= usage" identity here. The aggregate
+    # "cpu" line and the per-core lines are accounted independently by the
+    # kernel, so on near-idle machines a one-tick discrepancy is normal.
+    # The load-bearing check lives in check_summary, on the loaded window.
 
 
 def check_summary(summary):
@@ -140,6 +140,18 @@ def check_summary(summary):
     expect(cpu["max"] > 5.0, f"cpu.usage_pct max {cpu['max']} — load not detected")
     mem = next(m for m in summary["metrics"] if m["name"] == "mem.used_pct")
     expect(0.0 <= mem["mean"] <= 100.0, "mem.used_pct mean in [0,100]")
+
+    # Per-core identity, on the loaded window where it is noise-immune:
+    # one busy thread pegs a core near 100%, and the hottest core's peak
+    # must dominate the aggregate peak. This is what actually validates the
+    # per-core parsing on every OS.
+    max_core = next(m for m in summary["metrics"]
+                    if m["name"] == "cpu.max_core_busy_pct")
+    if max_core["n"] > 0:
+        expect(max_core["max"] > 50.0,
+               f"max_core peak {max_core['max']} — busy thread not visible per-core")
+        expect(max_core["max"] + 2.0 >= cpu["max"],
+               f"max core peak {max_core['max']} < aggregate peak {cpu['max']}")
 
 
 def check_history(history, interval_ms):
