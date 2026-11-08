@@ -189,7 +189,7 @@ void Monitor::tick(const std::chrono::steady_clock::time_point &t) {
     s.disk_ok = true;
     if (have_prev_ && dt > 0) {
       double sum_rb = 0, sum_wb = 0, sum_ri = 0, sum_wi = 0, max_util = 0;
-      bool any = false;
+      bool any = false, any_util = false;
       for (const auto &[key, after] : disks) {
         const auto before = prev_disks_.find(key);
         if (before == prev_disks_.end()) continue; // appeared mid-window
@@ -199,7 +199,10 @@ void Monitor::tick(const std::chrono::steady_clock::time_point &t) {
         sum_wb += wb;
         sum_ri += ri;
         sum_wi += wi;
-        max_util = any ? std::max(max_util, util) : util;
+        if (before->second.util_supported && after.util_supported) {
+          max_util = any_util ? std::max(max_util, util) : util;
+          any_util = true;
+        }
         any = true;
       }
       if (any) {
@@ -207,7 +210,7 @@ void Monitor::tick(const std::chrono::steady_clock::time_point &t) {
         s.value[M_DISK_WRITE_BPS] = sum_wb;
         s.value[M_DISK_READ_IOPS] = sum_ri;
         s.value[M_DISK_WRITE_IOPS] = sum_wi;
-        s.value[M_DISK_MAX_UTIL] = max_util;
+        if (any_util) s.value[M_DISK_MAX_UTIL] = max_util;
       }
     }
     s.value[M_DISK_PSI] = psi_avg10("/proc/pressure/io", "some");

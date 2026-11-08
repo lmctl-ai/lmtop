@@ -11,9 +11,21 @@ The resource readers and the metric set are aligned with
 eligibility rules, same host-normalized percentages, same missing-value
 convention (`-1`).
 
-**Platform support**: full sampling on Linux. The binary builds and answers
-the protocol on Windows and macOS too, where `status.supported` is `false`
-and sampling methods return the unsupported envelope (lmdebug convention).
+**Platform support**: full sampling on all three OSes via conditional
+compilation — one `sys` backend per platform, selected by CMake:
+
+| OS | source | CPU | memory | disk | network |
+|---|---|---|---|---|---|
+| Linux | `src/procfs.cpp` | `/proc/stat` | `/proc/meminfo` | `/proc/diskstats` + `/sys` eligibility | `/proc/net/dev` |
+| Windows | `src/sys_win.cpp` | PDH `\Processor` | `GlobalMemoryStatusEx` | PDH `\PhysicalDisk(*)` | PDH `\Network Interface(*)` |
+| macOS | `src/sys_mac.cpp` | `host_processor_info` | `sysctl` + `host_statistics64` | IOKit block-storage statistics | `getifaddrs` (`AF_LINK`) |
+
+Metric-shape parity is exact on every OS: PDH rates and gauges are rebased
+per tick into pseudo-counters, so the shared delta path
+(`cpu_percentages`, `disk_delta`) computes the same values everywhere.
+Known gaps, reported honestly instead of fabricated: PSI gauges exist only
+on Linux (`-1` elsewhere); Windows has no iowait (`0`); macOS exposes no
+per-disk busy time (`disk.max_util_pct` = `-1`).
 
 ## Build
 

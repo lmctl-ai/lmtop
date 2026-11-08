@@ -13,10 +13,21 @@ namespace lmtop {
 
 // --- Platform ---------------------------------------------------------------
 
-// True when this build can sample (Linux /proc readers); false elsewhere.
-bool sampling_supported();
 // "linux" | "windows" | "macos" | "unknown".
-std::string platform_name();
+inline std::string platform_name() {
+#if defined(_WIN32)
+  return "windows";
+#elif defined(__APPLE__)
+  return "macos";
+#elif defined(__linux__)
+  return "linux";
+#else
+  return "unknown";
+#endif
+}
+
+// True when this build can sample (all OSes; readers differ per platform).
+bool sampling_supported();
 
 // --- CPU (/proc/stat) -------------------------------------------------------
 
@@ -59,7 +70,8 @@ struct DiskCounters {
   uint64_t reads = 0, read_sectors = 0, read_ms = 0;
   uint64_t writes = 0, write_sectors = 0, write_ms = 0;
   uint64_t io_ms = 0;
-  uint64_t diskseq = 0; // identity guard, 0 when /sys has none
+  uint64_t diskseq = 0;  // identity guard, 0 when /sys has none
+  bool util_supported = true; // false where the OS exposes no per-disk busy
 };
 
 using DiskSnapshot = std::map<std::pair<int64_t, int64_t>, DiskCounters>;
