@@ -5,8 +5,12 @@
 #include <csignal>
 #include <cstdio>
 #include <iostream>
-#include <poll.h>
 #include <string>
+
+#if !defined(_WIN32)
+#include <poll.h>
+#include <unistd.h>
+#endif
 #include "json.hpp"
 #include "monitor.hpp"
 

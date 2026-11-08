@@ -40,6 +40,7 @@ int usage(FILE *stream) {
 }
 
 bool write_all(int fd, const std::string &data) {
+#if !defined(_WIN32)
   size_t off = 0;
   while (off < data.size()) {
     const ssize_t n = write(fd, data.data() + off, data.size() - off);
@@ -50,6 +51,11 @@ bool write_all(int fd, const std::string &data) {
     off += static_cast<size_t>(n);
   }
   return true;
+#else
+  (void)fd;
+  (void)data;
+  return false; // Windows paths use WriteFile directly
+#endif
 }
 
 // Extracts the next complete line from `pending`, if any.

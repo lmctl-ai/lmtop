@@ -6,6 +6,10 @@
 #include <csignal>
 #include <string>
 
+#ifndef NOMINMAX
+#define NOMINMAX // windows.h must not define min/max macros
+#endif
+
 #if defined(_WIN32)
 #include <windows.h>
 #elif defined(__linux__)
