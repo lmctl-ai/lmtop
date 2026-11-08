@@ -242,7 +242,7 @@ PdhQuery &disk_query(std::string &open_error) {
     // Utilization comes from % Idle Time, not % Disk Time: the latter is
     // unreliable (can exceed 100% on fast/RAID storage). Same choice as
     // lmdebug sample_win.cpp.
-    return query.open(
+    query.open(
         {"\\\\PhysicalDisk(*)\\Disk Read Bytes/sec",
          "\\\\PhysicalDisk(*)\\Disk Write Bytes/sec",
          "\\\\PhysicalDisk(*)\\Disk Reads/sec",
@@ -259,7 +259,7 @@ PdhQuery &net_query(std::string &open_error) {
   static PdhQuery query;
   static const std::string init_error = [] {
     std::string error;
-    return query.open(
+    query.open(
         {"\\\\Network Interface(*)\\Bytes Received/sec",
          "\\\\Network Interface(*)\\Bytes Sent/sec",
          "\\\\Network Interface(*)\\Packets Received/sec",
