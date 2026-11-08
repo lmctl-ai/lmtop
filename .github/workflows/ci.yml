@@ -17,6 +17,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Probe PDH via Get-Counter
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          try {
+            Get-Counter '\Processor(_Total)\% User Time' -MaxSamples 2 | Out-Null
+            Write-Host "PDH PROBE: OK"
+          } catch {
+            Write-Host "PDH PROBE: FAILED - $_"
+          }
+
       - name: Repair performance counters
         if: runner.os == 'Windows'
         shell: pwsh
