@@ -51,9 +51,29 @@ public:
                  "waiting for requests on stdin\n",
                  static_cast<long long>(interval_ms_), cap_mb_);
 
-    // poll() with a timeout instead of a blocking getline: signal handlers
-    // only set a flag (std::cin retries through EINTR internally), so the
-    // timeout is what guarantees shutdown is observed promptly.
+    // POSIX: poll() with a timeout instead of a blocking getline — signal
+    // handlers only set a flag (std::cin retries through EINTR internally),
+    // so the timeout is what guarantees shutdown is observed promptly.
+    // Windows: no signals to speak of; the blocking getline plus `stop` and
+    // EOF is sufficient.
+    auto serve_line = [this](std::string &line) -> int {
+      if (line.empty()) return 0;
+      const std::string response = handle(line);
+      std::cout << response << '\n';
+      std::cout.flush();
+      if (std::cout.bad()) return 4; // stdout write failure
+      return 0;
+    };
+#if defined(_WIN32)
+    std::string line;
+    while (!g_stop) {
+      if (!std::getline(std::cin, line)) break; // EOF or error
+      if (const int rc = serve_line(line)) {
+        monitor_.stop();
+        return rc;
+      }
+    }
+#else
     std::string line;
     while (!g_stop) {
       pollfd fds{STDIN_FILENO, POLLIN, 0};
@@ -64,15 +84,12 @@ public:
       }
       if (ready == 0) continue;
       if (!std::getline(std::cin, line)) break; // EOF or error
-      if (line.empty()) continue;
-      const std::string response = handle(line);
-      std::cout << response << '\n';
-      std::cout.flush();
-      if (std::cout.bad()) {
+      if (const int rc = serve_line(line)) {
         monitor_.stop();
-        return 4; // stdout write failure, lmdebug cli convention
+        return rc;
       }
     }
+#endif
     monitor_.stop();
     return 0;
   }
@@ -138,6 +155,7 @@ private:
 } // namespace
 
 int run_server(int64_t interval_ms, size_t cap_mb) {
+#if !defined(_WIN32)
   // No SA_RESTART: a signal must interrupt the blocked stdin read so the
   // loop can observe g_stop and shut down cleanly.
   struct sigaction action {};
@@ -145,6 +163,7 @@ int run_server(int64_t interval_ms, size_t cap_mb) {
   sigemptyset(&action.sa_mask);
   sigaction(SIGINT, &action, nullptr);
   sigaction(SIGTERM, &action, nullptr);
+#endif
   return Server(interval_ms, cap_mb).run();
 }
 

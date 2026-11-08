@@ -41,6 +41,7 @@ private:
   std::thread thread_;
   std::atomic<bool> stop_{false};
   bool running_ = false;
+  bool supported_ = true;
 
   std::chrono::milliseconds interval_{1000};
   std::chrono::steady_clock::time_point started_steady_{};

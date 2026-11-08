@@ -4,8 +4,14 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <string>
+
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__linux__)
 #include <pthread.h>
 #include <unistd.h>
+#endif
 
 #include "stats.hpp"
 
@@ -39,6 +45,16 @@ bool Monitor::start(int64_t interval_ms, size_t cap_bytes, std::string &error) {
   interval_ = std::chrono::milliseconds(std::clamp<int64_t>(interval_ms, 100, 60000));
   cap_samples_ = std::max<size_t>(1, cap_bytes / kSampleBytes);
 
+  started_steady_ = std::chrono::steady_clock::now();
+  started_unix_ms_ = now_unix_ms();
+  prev_time_ = started_steady_;
+
+  if (!sampling_supported()) {
+    supported_ = false; // server stays up; methods report the envelope
+    running_ = true;
+    return true;
+  }
+
   // Baseline snapshot for the delta rates; the first Sample appears after
   // one interval, so deltas always have a measured dt.
   CpuCounters cpu_total;
@@ -61,9 +77,6 @@ bool Monitor::start(int64_t interval_ms, size_t cap_bytes, std::string &error) {
     prev_disks_ = std::move(disks);
     prev_links_ = std::move(links);
     have_prev_ = true;
-    started_steady_ = std::chrono::steady_clock::now();
-    started_unix_ms_ = now_unix_ms();
-    prev_time_ = started_steady_;
   }
   if (!err.empty()) fprintf(stderr, "lmtop: warning: %s\n", err.c_str());
 
@@ -80,6 +93,7 @@ void Monitor::stop() {
 }
 
 void Monitor::loop() {
+#if defined(__linux__)
   // Route SIGINT/SIGTERM to the server's main thread (which is blocked on the
   // stdin read): keep them blocked here for the lifetime of the thread.
   sigset_t blocked;
@@ -87,6 +101,7 @@ void Monitor::loop() {
   sigaddset(&blocked, SIGINT);
   sigaddset(&blocked, SIGTERM);
   pthread_sigmask(SIG_BLOCK, &blocked, nullptr);
+#endif
 
   auto next = started_steady_ + interval_;
   while (!stop_) {
@@ -258,12 +273,21 @@ Json Monitor::status_json() const {
   const auto uptime_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - started_steady_)
                              .count();
-  char host[256] = {0};
-  if (gethostname(host, sizeof host - 1) != 0) host[0] = '\0';
+  std::string host = "unknown";
+  int64_t pid = 0;
+#if defined(__linux__)
+  char buf[256] = {0};
+  if (gethostname(buf, sizeof buf - 1) == 0 && buf[0] != '\0') host = buf;
+  pid = static_cast<int64_t>(getpid());
+#elif defined(_WIN32)
+  pid = static_cast<int64_t>(GetCurrentProcessId());
+#endif
   return Json::obj({
       {"protocol", "lmtop/1"},
-      {"pid", static_cast<int64_t>(getpid())},
+      {"pid", pid},
       {"hostname", host},
+      {"platform", platform_name()},
+      {"supported", supported_},
       {"uptime_ms", uptime_ms},
       {"started_unix_ms", started_unix_ms_},
       {"interval_ms", interval_.count()},
@@ -280,6 +304,10 @@ Json Monitor::status_json() const {
 
 Json Monitor::now_json() const {
   std::unique_lock<std::mutex> lock(mu_);
+  if (!supported_) {
+    return Json::obj(
+        {{"error", "unsupported platform: " + platform_name()}});
+  }
   if (history_.empty()) {
     // Warm-up: a freshly started server has no delta window yet. Wait for the
     // first tick (bounded by ~2 intervals) so one-shot callers get a sample.
@@ -305,6 +333,10 @@ Json Monitor::now_json() const {
 
 Json Monitor::history_json(int64_t seconds, int64_t max_points) const {
   std::lock_guard<std::mutex> lock(mu_);
+  if (!supported_) {
+    return Json::obj(
+        {{"error", "unsupported platform: " + platform_name()}});
+  }
   Json::Array columns;
   columns.push_back(Json("unix_ms"));
   columns.push_back(Json("dt_s"));
@@ -353,6 +385,10 @@ Json Monitor::history_json(int64_t seconds, int64_t max_points) const {
 
 Json Monitor::summary_json(int64_t seconds) const {
   std::lock_guard<std::mutex> lock(mu_);
+  if (!supported_) {
+    return Json::obj(
+        {{"error", "unsupported platform: " + platform_name()}});
+  }
   size_t total = history_.size();
   if (seconds > 0 && !history_.empty()) {
     const int64_t cutoff = history_.back().unix_ms - seconds * 1000;

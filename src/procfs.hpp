@@ -11,6 +11,13 @@
 
 namespace lmtop {
 
+// --- Platform ---------------------------------------------------------------
+
+// True when this build can sample (Linux /proc readers); false elsewhere.
+bool sampling_supported();
+// "linux" | "windows" | "macos" | "unknown".
+std::string platform_name();
+
 // --- CPU (/proc/stat) -------------------------------------------------------
 
 // user nice system idle iowait irq softirq steal

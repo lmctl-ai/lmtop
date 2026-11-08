@@ -1,11 +1,5 @@
 #include "client.hpp"
 
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +8,16 @@
 #include <vector>
 
 #include "json.hpp"
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 namespace lmtop {
 namespace {
@@ -28,7 +32,10 @@ struct Options {
 int usage(FILE *stream) {
   std::fprintf(stream,
                "usage: lmtop client [--id N] [--interval MS] <method> [params-json]\n"
-               "       lmtop client [--id N] --in PATH --out PATH <method> [params-json]\n");
+#if !defined(_WIN32)
+               "       lmtop client [--id N] --in PATH --out PATH <method> [params-json]\n"
+#endif
+  );
   return stream == stdout ? 0 : 2;
 }
 
@@ -59,35 +66,98 @@ bool is_matching_response(const std::string &line, int64_t id) {
   std::string error;
   if (!parse(line, response, error) || !response.is_object()) return false;
   const Json *rid = response.find("id");
-  return rid && rid->is_number() && rid->as_int() == id;
+  return rid && rid->is_int() && rid->as_int() == id;
 }
 
-// Reads until EOF (spawn mode: the child stays alive, so this is bounded by
-// the matching response arriving; the caller stops the server afterwards).
-// Keeps the LAST line whose id matches, in case stale duplicates exist.
-bool read_until_match(int fd, int64_t id, std::string &reply) {
-  std::string pending, line;
-  char buf[8192];
+// --- Spawn mode -------------------------------------------------------------
+
+#if defined(_WIN32)
+
+int spawn_mode(const Options &opt, const std::string &request) {
+  char exe_path[MAX_PATH] = {0};
+  GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
+
+  SECURITY_ATTRIBUTES inheritable{sizeof(inheritable), nullptr, TRUE};
+  HANDLE child_stdin_r = nullptr, child_stdin_w = nullptr;
+  HANDLE child_stdout_r = nullptr, child_stdout_w = nullptr;
+  if (!CreatePipe(&child_stdin_r, &child_stdin_w, &inheritable, 0) ||
+      !SetHandleInformation(child_stdin_w, HANDLE_FLAG_INHERIT, 0) ||
+      !CreatePipe(&child_stdout_r, &child_stdout_w, &inheritable, 0) ||
+      !SetHandleInformation(child_stdout_r, HANDLE_FLAG_INHERIT, 0)) {
+    std::fprintf(stderr, "lmtop client: CreatePipe failed (%lu)\n",
+                 GetLastError());
+    return 1;
+  }
+
+  std::string command = std::string("\"") + exe_path + "\" server --interval " +
+                        std::to_string(opt.interval_ms);
+  std::vector<char> mutable_command(command.begin(), command.end());
+  mutable_command.push_back('\0');
+
+  STARTUPINFOA startup{sizeof(startup)};
+  startup.dwFlags = STARTF_USESTDHANDLES;
+  startup.hStdInput = child_stdin_r;
+  startup.hStdOutput = child_stdout_w;
+  startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+  PROCESS_INFORMATION process{};
+  if (!CreateProcessA(nullptr, mutable_command.data(), nullptr, nullptr, TRUE,
+                      0, nullptr, nullptr, &startup, &process)) {
+    std::fprintf(stderr, "lmtop client: CreateProcess failed (%lu)\n",
+                 GetLastError());
+    return 1;
+  }
+  CloseHandle(child_stdin_r);
+  CloseHandle(child_stdout_w);
+
+  auto write_pipe = [&](HANDLE h, const std::string &s) {
+    DWORD written = 0;
+    return WriteFile(h, s.data(), static_cast<DWORD>(s.size()), &written,
+                     nullptr) == TRUE;
+  };
+
+  if (!write_pipe(child_stdin_w, request + "\n")) {
+    std::fprintf(stderr, "lmtop client: cannot write request\n");
+    TerminateProcess(process.hProcess, 1);
+    CloseHandle(child_stdin_w);
+    CloseHandle(child_stdout_r);
+    CloseHandle(process.hProcess);
+    CloseHandle(process.hThread);
+    return 1;
+  }
+
+  std::string pending, line, reply;
   bool matched = false;
-  while (true) {
-    const ssize_t n = read(fd, buf, sizeof buf);
-    if (n < 0) {
-      if (errno == EINTR) continue;
-      return matched;
-    }
-    if (n == 0) return matched;
+  char buf[8192];
+  while (!matched) {
+    DWORD n = 0;
+    if (ReadFile(child_stdout_r, buf, sizeof buf, &n, nullptr) == FALSE || n == 0)
+      break;
     pending.append(buf, static_cast<size_t>(n));
     while (next_line(pending, line)) {
-      if (is_matching_response(line, id)) {
+      if (is_matching_response(line, opt.id)) {
         reply = line;
         matched = true;
       }
     }
-    if (matched) return true;
   }
+
+  write_pipe(child_stdin_w,
+             dump(Json::obj({{"id", opt.id + 1}, {"method", "stop"}})) + "\n");
+  CloseHandle(child_stdin_w);
+  CloseHandle(child_stdout_r);
+  WaitForSingleObject(process.hProcess, INFINITE);
+  CloseHandle(process.hProcess);
+  CloseHandle(process.hThread);
+
+  if (!matched) {
+    std::fprintf(stderr, "lmtop client: no response from server\n");
+    return 1;
+  }
+  std::printf("%s\n", reply.c_str());
+  return 0;
 }
 
-// --- Spawn mode -------------------------------------------------------------
+#else // POSIX
 
 int spawn_mode(const Options &opt, const std::string &request) {
   int to_child[2], from_child[2];
@@ -120,19 +190,36 @@ int spawn_mode(const Options &opt, const std::string &request) {
   if (!write_all(to_child[1], request + "\n")) {
     std::fprintf(stderr, "lmtop client: cannot write request: %s\n",
                  std::strerror(errno));
-  } else if (read_until_match(from_child[0], opt.id, reply)) {
-    const std::string stop =
-        dump(Json::obj({{"id", opt.id + 1}, {"method", "stop"}}));
-    write_all(to_child[1], stop + "\n");
-    std::printf("%s\n", reply.c_str());
-    rc = 0;
   } else {
-    std::fprintf(stderr, "lmtop client: no response from server\n");
+    std::string pending, line;
+    bool matched = false;
+    char buf[8192];
+    while (!matched) {
+      const ssize_t n = read(from_child[0], buf, sizeof buf);
+      if (n < 0) {
+        if (errno == EINTR) continue;
+        break;
+      }
+      if (n == 0) break;
+      pending.append(buf, static_cast<size_t>(n));
+      while (next_line(pending, line)) {
+        if (is_matching_response(line, opt.id)) {
+          reply = line;
+          matched = true;
+        }
+      }
+    }
+    write_all(to_child[1],
+              dump(Json::obj({{"id", opt.id + 1}, {"method", "stop"}})) + "\n");
+    if (matched) rc = 0;
+    else std::fprintf(stderr, "lmtop client: no response from server\n");
   }
   close(to_child[1]);
   close(from_child[0]);
   int status = 0;
   waitpid(pid, &status, 0);
+
+  if (rc == 0) std::printf("%s\n", reply.c_str());
   return rc;
 }
 
@@ -199,6 +286,8 @@ int fifo_mode(const Options &opt, const std::string &request) {
   return 0;
 }
 
+#endif // _WIN32
+
 } // namespace
 
 int run_client(const std::vector<std::string> &args) {
@@ -246,6 +335,12 @@ int run_client(const std::vector<std::string> &args) {
     std::fprintf(stderr, "lmtop client: --in and --out must be given together\n");
     return usage(stderr);
   }
+#if defined(_WIN32)
+  if (!opt.in_path.empty()) {
+    std::fprintf(stderr, "lmtop client: FIFO mode is POSIX-only\n");
+    return 2;
+  }
+#endif
   opt.method = positional[0];
   if (positional.size() == 2) opt.params = positional[1];
 
@@ -265,8 +360,12 @@ int run_client(const std::vector<std::string> &args) {
   Json request = Json::obj({{"id", opt.id}, {"method", opt.method}});
   if (!opt.params.empty()) request.set("params", params);
 
+#if defined(_WIN32)
+  return spawn_mode(opt, dump(request));
+#else
   if (!opt.in_path.empty()) return fifo_mode(opt, dump(request));
   return spawn_mode(opt, dump(request));
+#endif
 }
 
 } // namespace lmtop

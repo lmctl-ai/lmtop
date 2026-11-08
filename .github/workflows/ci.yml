@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Integration test
+        run: python3 tests/integration.py build
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: lmtop-${{ matrix.os }}
+          path: |
+            build/**/lmtop
+            build/**/lmtop.exe
+          if-no-files-found: error

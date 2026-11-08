@@ -9,6 +9,11 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Single-file binaries: static CRT on Windows, fully static on Linux GCC.
+if(WIN32)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+endif()
+
 find_package(Threads REQUIRED)
 
 add_executable(lmtop
@@ -23,6 +28,10 @@ add_executable(lmtop
 
 target_include_directories(lmtop PRIVATE src)
 target_link_libraries(lmtop PRIVATE Threads::Threads)
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_options(lmtop PRIVATE -static)
+endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(lmtop PRIVATE -Wall -Wextra -Wpedantic)

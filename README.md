@@ -11,13 +11,30 @@ The resource readers and the metric set are aligned with
 eligibility rules, same host-normalized percentages, same missing-value
 convention (`-1`).
 
+**Platform support**: full sampling on Linux. The binary builds and answers
+the protocol on Windows and macOS too, where `status.supported` is `false`
+and sampling methods return the unsupported envelope (lmdebug convention).
+
 ## Build
 
 ```sh
 cmake -B build && cmake --build build -j
 ```
 
-Requires a C++17 compiler and pthreads. Linux only (the readers are procfs).
+Requires a C++17 compiler and pthreads. Linux builds are fully static
+(single executable, no runtime dependencies); Windows builds use the static
+CRT.
+
+## Integration test
+
+```sh
+python3 tests/integration.py build
+```
+
+Runs the real server on any OS: full metric/statistics/history checks where
+sampling is supported, unsupported-envelope checks elsewhere, plus malformed
+request, unknown method, and clean-shutdown checks. GitHub Actions runs it on
+ubuntu / windows / macos and uploads one executable artifact per OS.
 
 ## Running
 

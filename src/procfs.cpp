@@ -1,14 +1,38 @@
 #include "procfs.hpp"
 #include "metrics.hpp"
 
+#if defined(__linux__)
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <sstream>
+#endif
 
 namespace lmtop {
+
+bool sampling_supported() {
+#if defined(__linux__)
+  return true;
+#else
+  return false;
+#endif
+}
+
+std::string platform_name() {
+#if defined(_WIN32)
+  return "windows";
+#elif defined(__APPLE__)
+  return "macos";
+#elif defined(__linux__)
+  return "linux";
+#else
+  return "unknown";
+#endif
+}
+
+#if defined(__linux__)
 namespace {
 
 bool u64_token(const std::string &s, uint64_t &value) {
@@ -362,5 +386,36 @@ bool read_net_dev(NetSnapshot &out, std::string &error) {
   }
   return true;
 }
+
+#else
+
+// Stubs: the binary builds and answers the protocol on every OS (lmdebug
+// convention); sampling reports unsupported instead of failing to compile.
+bool read_cpu_snapshot(std::map<int64_t, CpuCounters> &, CpuCounters &) {
+  return false;
+}
+bool cpu_percentages(const CpuCounters &, const CpuCounters &, double &, double &,
+                     double &, double &) {
+  return false;
+}
+double psi_avg10(const char *, const char *) { return missing(); }
+bool read_meminfo(MemInfo &, std::string &error) {
+  error = "unsupported platform";
+  return false;
+}
+bool read_disk_snapshot(DiskSnapshot &, std::string &error) {
+  error = "unsupported platform";
+  return false;
+}
+bool disk_delta(const DiskCounters &, const DiskCounters &, double, double &,
+                double &, double &, double &, double &) {
+  return false;
+}
+bool read_net_dev(NetSnapshot &, std::string &error) {
+  error = "unsupported platform";
+  return false;
+}
+
+#endif // __linux__
 
 } // namespace lmtop
