@@ -46,10 +46,25 @@ jobs:
           lodctr /R
 
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_GENERATOR_PLATFORM=x64
 
       - name: Build
         run: cmake --build build --config Release -j
+
+      - name: Verify x86_64 binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Filter lmtop.exe build | Select-Object -First 1
+          $fs = [System.IO.File]::OpenRead($exe.FullName)
+          $br = New-Object System.IO.BinaryReader($fs)
+          $fs.Seek(0x3C, 'Begin') | Out-Null
+          $peOff = $br.ReadUInt32()
+          $fs.Seek($peOff + 4, 'Begin') | Out-Null
+          $machine = $br.ReadUInt16()
+          $br.Close(); $fs.Close()
+          if ($machine -ne 0x8664) { throw "lmtop.exe is not x64 (machine=0x$($machine.ToString('X4')))" }
+          Write-Host "PE machine: 0x$($machine.ToString('X4')) (x64)"
 
       - name: Integration test
         run: python3 tests/integration.py build
