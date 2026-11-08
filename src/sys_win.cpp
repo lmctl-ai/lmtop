@@ -113,6 +113,12 @@ uint64_t mono_pct(const std::string &key, double pct) {
   return monotonic().next(key, pseudo_pct(pct, 1.0));
 }
 
+std::string pdh_status_string(PDH_STATUS status) {
+  char buf[32];
+  std::snprintf(buf, sizeof buf, "0x%08lx", static_cast<unsigned long>(status));
+  return buf;
+}
+
 std::string wide_to_utf8(const wchar_t *w) {
   if (!w) return {};
   const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
@@ -127,16 +133,23 @@ std::string wide_to_utf8(const wchar_t *w) {
 class PdhQuery {
 public:
   bool open(const std::vector<std::string> &paths, std::string &error) {
-    if (PdhOpenQueryW(nullptr, 0, &query_) != ERROR_SUCCESS) {
-      error = "PdhOpenQueryW failed";
+    const PDH_STATUS open_status = PdhOpenQueryW(nullptr, 0, &query_);
+    if (open_status != ERROR_SUCCESS) {
+      error = "PdhOpenQueryW failed: " + pdh_status_string(open_status);
       return false;
     }
     for (const std::string &path : paths) {
       std::wstring wide(path.begin(), path.end());
       PDH_HCOUNTER counter = nullptr;
-      if (PdhAddEnglishCounterW(query_, wide.c_str(), 0, &counter) !=
-          ERROR_SUCCESS) {
-        error = "PdhAddEnglishCounterW failed: " + path;
+      PDH_STATUS status =
+          PdhAddEnglishCounterW(query_, wide.c_str(), 0, &counter);
+      if (status != ERROR_SUCCESS) {
+        // Fall back to the locale-named API; identical on English systems.
+        status = PdhAddCounterW(query_, wide.c_str(), 0, &counter);
+      }
+      if (status != ERROR_SUCCESS) {
+        error = "PdhAddCounterW failed " + path + ": " +
+                pdh_status_string(status);
         close();
         return false;
       }
@@ -156,8 +169,9 @@ public:
     prev_ = now;
     first_ = false;
 
-    if (PdhCollectQueryData(query_) != ERROR_SUCCESS) {
-      error = "PdhCollectQueryData failed";
+    const PDH_STATUS collect_status = PdhCollectQueryData(query_);
+    if (collect_status != ERROR_SUCCESS) {
+      error = "PdhCollectQueryData failed: " + pdh_status_string(collect_status);
       return false;
     }
     for (size_t i = 0; i < counters_.size(); ++i) {
