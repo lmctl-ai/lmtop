@@ -13,13 +13,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            asset: lmtop-linux-x86_64
-          - os: windows-2025
-            asset: lmtop-windows-x86_64.exe
-          - os: macos-latest
-            asset: lmtop-macos-arm64
-    runs-on: ${{ matrix.os }}
+          - { runner: ubuntu-24.04,     name: linux-x86_64,   file_pat: 'x86-64|x86_64' }
+          - { runner: ubuntu-24.04-arm, name: linux-arm64,    file_pat: 'aarch64|arm64' }
+          - { runner: macos-15-intel,   name: macos-x86_64,   file_pat: 'x86-64|x86_64' }
+          - { runner: macos-15,         name: macos-arm64,    file_pat: 'aarch64|arm64' }
+          - { runner: windows-2025,     name: windows-x86_64, pe_machine: '0x8664', ext: .exe }
+          - { runner: windows-11-arm,   name: windows-arm64,  pe_machine: '0xAA64', ext: .exe, cmake_args: '-A ARM64' }
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - uses: actions/checkout@v4
@@ -46,12 +46,12 @@ jobs:
           lodctr /R
 
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_args }}
 
       - name: Build
         run: cmake --build build --config Release -j
 
-      - name: Verify x86_64 binary
+      - name: Verify PE machine type
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -63,8 +63,16 @@ jobs:
           $fs.Seek($peOff + 4, 'Begin') | Out-Null
           $machine = $br.ReadUInt16()
           $br.Close(); $fs.Close()
-          if ($machine -ne 0x8664) { throw "lmtop.exe is not x64 (machine=0x$($machine.ToString('X4')))" }
-          Write-Host "PE machine: 0x$($machine.ToString('X4')) (x64)"
+          $expected = [Convert]::ToInt64('${{ matrix.pe_machine }}', 16)
+          if ($machine -ne $expected) { throw "lmtop.exe machine=0x$($machine.ToString('X4')), expected ${{ matrix.pe_machine }}" }
+          Write-Host "PE machine: 0x$($machine.ToString('X4')) (expected ${{ matrix.pe_machine }})"
+
+      - name: Verify executable architecture
+        if: runner.os != 'Windows'
+        run: |
+          binary=$(find build -type f -name lmtop ! -path '*CMakeFiles*' | head -n1)
+          file "$binary"
+          file "$binary" | grep -E '${{ matrix.file_pat }}'
 
       - name: Integration test
         run: python3 tests/integration.py build
@@ -77,13 +85,13 @@ jobs:
           c = [p for pat in ('lmtop', 'lmtop.exe') for p in glob.glob('build/**/' + pat, recursive=True)]
           c = [p for p in c if 'CMakeFiles' not in p]
           print(sorted(c, key=len)[0])")
-          cp "$binary" "${{ matrix.asset }}"
+          cp "$binary" "lmtop-${{ matrix.name }}${{ matrix.ext }}"
 
       - name: Upload asset
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          name: lmtop-${{ matrix.name }}${{ matrix.ext }}
+          path: lmtop-${{ matrix.name }}${{ matrix.ext }}
 
   release:
     needs: build

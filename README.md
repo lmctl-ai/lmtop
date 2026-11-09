@@ -46,7 +46,11 @@ python3 tests/integration.py build
 Runs the real server on any OS: full metric/statistics/history checks where
 sampling is supported, unsupported-envelope checks elsewhere, plus malformed
 request, unknown method, and clean-shutdown checks. GitHub Actions runs it on
-ubuntu / windows / macos and uploads one executable artifact per OS.
+3 OS x 2 arch (linux/macos/windows, x86_64/arm64) and uploads one executable
+artifact per target.
+
+Release tags build the same matrix and publish six assets:
+`lmtop-{linux,macos,windows}-{x86_64,arm64}` (Windows with `.exe`).
 
 ## Running
 
